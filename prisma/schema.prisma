@@ -1,0 +1,40 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Session {
+  id                   String   @id
+  started_at           DateTime @default(now())
+  model_name           String
+  total_input_tokens   Int      @default(0)
+  total_output_tokens  Int      @default(0)
+  estimated_cost       Float    @default(0)
+  spans                Span[]
+}
+
+model Span {
+  id             String     @id
+  session        Session    @relation(fields: [session_id], references: [id])
+  session_id     String
+  parent_span_id String?
+  traceId        String
+  name           String
+  status         String
+  attributes     String     // SQLite doesn't support JSON, use String and parse/stringify
+  duration_ms    Int
+  started_at     DateTime?  // Optional for backward compatibility, but we should populate it
+  tool_calls     ToolCall[]
+}
+
+model ToolCall {
+  id       Int    @id @default(autoincrement())
+  span     Span   @relation(fields: [span_id], references: [id])
+  span_id  String
+  name     String
+  input    String // SQLite doesn't support JSON
+  output   String // SQLite doesn't support JSON
+}
