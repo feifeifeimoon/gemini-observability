@@ -69,7 +69,6 @@ export async function processTracePayload(payload: OtlpTracePayload) {
 
   for (const resourceSpan of payload.resourceSpans) {
     const resourceAttrs = flattenAttributes(resourceSpan.resource.attributes);
-    // Initial model name from resource, or fallback
     let current_model_name = resourceAttrs['model_name'] || 'unknown-model';
 
     for (const scopeSpan of resourceSpan.scopeSpans) {
@@ -90,97 +89,74 @@ export async function processTracePayload(payload: OtlpTracePayload) {
           const attributes = flattenAttributes(otelSpan.attributes);
           const status = otelSpan.status.code === 1 ? 'OK' : (otelSpan.status.code === 2 ? 'ERROR' : 'UNSET');
 
-          // 🚨 IMPROVEMENT: Check span attributes for specific model name (Gen AI conventions)
-          const span_model = attributes['gen_ai.request.model'] || attributes['model'];
+          const span_model = attributes['gen_ai.request.model'];
           if (span_model && current_model_name === 'unknown-model') {
             current_model_name = span_model;
           }
 
-          // Extract token usage
           const inputTokens = Number(attributes['gen_ai.usage.input_tokens'] || 0);
           const outputTokens = Number(attributes['gen_ai.usage.output_tokens'] || 0);
           const cost = calculateCost(current_model_name, inputTokens, outputTokens);
 
-          // Manual session management
-          const existingSession = await prisma.session.findUnique({ where: { id: traceId } });
-          
-          if (existingSession) {
-            await prisma.session.update({
-              where: { id: traceId },
-              data: {
-                // Update model name if we found a better one
-                model_name: existingSession.model_name === 'unknown-model' ? current_model_name : existingSession.model_name,
-                total_input_tokens: existingSession.total_input_tokens + inputTokens,
-                total_output_tokens: existingSession.total_output_tokens + outputTokens,
-                estimated_cost: existingSession.estimated_cost + cost,
-              }
-            });
-          } else {
-            await prisma.session.create({
-              data: {
-                id: traceId,
-                model_name: current_model_name,
-                started_at: startedAt,
-                total_input_tokens: inputTokens,
-                total_output_tokens: outputTokens,
-                estimated_cost: cost,
-              }
-            });
-          }
+          // Session management
+          await prisma.session.upsert({
+            where: { id: traceId },
+            update: {
+              model_name: current_model_name !== 'unknown-model' ? current_model_name : undefined,
+              total_input_tokens: { increment: inputTokens },
+              total_output_tokens: { increment: outputTokens },
+              estimated_cost: { increment: cost },
+            },
+            create: {
+              id: traceId,
+              model_name: current_model_name,
+              started_at: startedAt,
+              total_input_tokens: inputTokens,
+              total_output_tokens: outputTokens,
+              estimated_cost: cost,
+            }
+          });
 
-          // Manual span management
-          const existingSpan = await prisma.span.findUnique({ where: { id: spanId } });
-          if (existingSpan) {
-            await prisma.span.update({
-              where: { id: spanId },
-              data: {
-                status,
-                attributes: JSON.stringify(attributes),
-                duration_ms,
-                started_at: startedAt,
-              }
-            });
-          } else {
-            await prisma.span.create({
-              data: {
-                id: spanId,
-                session_id: traceId,
-                parent_span_id: parentSpanId || null,
-                traceId: traceId,
-                name: name,
-                status: status,
-                attributes: JSON.stringify(attributes),
-                duration_ms: duration_ms,
-                started_at: startedAt,
-              }
-            });
-          }
+          // Span management
+          await prisma.span.upsert({
+            where: { id: spanId },
+            update: {
+              status,
+              attributes: JSON.stringify(attributes),
+              duration_ms,
+              started_at: startedAt,
+            },
+            create: {
+              id: spanId,
+              session_id: traceId,
+              parent_span_id: parentSpanId || null,
+              traceId: traceId,
+              name: name,
+              status: status,
+              attributes: JSON.stringify(attributes),
+              duration_ms: duration_ms,
+              started_at: startedAt,
+            }
+          });
 
-          // Special handling for tool.execute
-          if (name === 'tool.execute') {
-            const toolName = attributes['tool_name'] || 'unknown';
-            const input = attributes['input'] || '{}';
-            const output = attributes['output'] || '{}';
+          // Strict Tool Call Extraction
+          if (name === 'tool_call') {
+            const toolName = attributes['gen_ai.tool.name'];
+            const input = attributes['gen_ai.input.messages'];
+            const output = attributes['gen_ai.output.messages'];
 
-            const existingToolCall = await prisma.toolCall.findFirst({
-              where: { span_id: spanId }
-            });
-
-            const toolData = {
-              span_id: spanId,
-              name: String(toolName),
-              input: typeof input === 'string' ? input : JSON.stringify(input),
-              output: typeof output === 'string' ? output : JSON.stringify(output),
-            };
-
-            if (existingToolCall) {
-              await prisma.toolCall.update({
-                where: { id: existingToolCall.id },
-                data: toolData
-              });
-            } else {
+            if (toolName) {
+              // Clear previous tool calls for this span to avoid unique constraint issues if we had them
+              // and ensure we only have one tool record per spanId.
+              await prisma.toolCall.deleteMany({ where: { span_id: spanId } });
+              
               await prisma.toolCall.create({
-                data: toolData
+                data: {
+                  span_id: spanId,
+                  name: String(toolName),
+                  input: typeof input === 'string' ? input : JSON.stringify(input),
+                  output: typeof output === 'string' ? output : JSON.stringify(output),
+                }
               });
             }
           }

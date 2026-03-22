@@ -1,7 +1,5 @@
 import prisma from '@/lib/db';
 import { MiniChart } from '@/components/MiniChart';
-import { SystemHealth } from '@/components/SystemHealth';
-import { StreamEventLog } from '@/components/StreamEventLog';
 import { AutoRefresh } from '@/components/AutoRefresh';
 import { TimeSeriesChart } from '@/components/TimeSeriesChart';
 
@@ -23,12 +21,10 @@ export default async function DashboardPage() {
     orderBy: { started_at: 'desc' },
   });
 
-  // Basic stats
   const totalSessions = recentSessions.length;
   const totalTokens = recentSessions.reduce((acc, s) => acc + s.total_input_tokens + s.total_output_tokens, 0);
   const totalCost = recentSessions.reduce((acc, s) => acc + s.estimated_cost, 0);
 
-  // Time-series bucketing (24 buckets for 24h)
   const bucketCount = 24;
   const bucketSize = (24 * 60 * 60 * 1000) / bucketCount;
   
@@ -37,80 +33,128 @@ export default async function DashboardPage() {
     return Math.min(bucketCount - 1, Math.max(0, Math.floor(age / bucketSize)));
   };
 
-  // 1. Sessions Over Time
-  const sessionBuckets = new Array(bucketCount).fill(0);
-  recentSessions.forEach(s => {
-    sessionBuckets[getBucketIdx(s.started_at)]++;
-  });
-  const sessionData = sessionBuckets.reverse().map((count, i) => ({
-    label: `${i}h`,
-    values: [{ key: 'Sessions', value: (count / (Math.max(...sessionBuckets, 1))) * 100 }]
-  }));
+  // --- USAGE MODULE DATA ---
+  const sessionsUsageBuckets = new Array(bucketCount).fill(0);
+  const tokensUsageBuckets: Record<string, number[]> = { cache: new Array(bucketCount).fill(0), input: new Array(bucketCount).fill(0), output: new Array(bucketCount).fill(0), thought: new Array(bucketCount).fill(0) };
+  const linesUsageBuckets: Record<string, number[]> = { added: new Array(bucketCount).fill(0), removed: new Array(bucketCount).fill(0) };
 
-  // 2. Tokens Over Time (Input vs Output)
-  const tokenInBuckets = new Array(bucketCount).fill(0);
-  const tokenOutBuckets = new Array(bucketCount).fill(0);
+  let totalLinesChanges = 0;
+
   recentSessions.forEach(s => {
     const idx = getBucketIdx(s.started_at);
-    tokenInBuckets[idx] += s.total_input_tokens;
-    tokenOutBuckets[idx] += s.total_output_tokens;
+    sessionsUsageBuckets[idx]++;
+    tokensUsageBuckets.input[idx] += s.total_input_tokens || 0;
+    tokensUsageBuckets.output[idx] += s.total_output_tokens || 0;
+    
+    s.spans.forEach(sp => {
+      try {
+        const attrs = JSON.parse(sp.attributes || '{}');
+        if (attrs['gen_ai.usage.cache_read_tokens']) {
+          tokensUsageBuckets.cache[idx] += Number(attrs['gen_ai.usage.cache_read_tokens']) || 0;
+        }
+        if (attrs.lines_added) {
+          const added = Number(attrs.lines_added);
+          linesUsageBuckets.added[idx] += added;
+          totalLinesChanges += added;
+        }
+        if (attrs.lines_removed) {
+          const removed = Number(attrs.lines_removed);
+          linesUsageBuckets.removed[idx] += removed;
+          totalLinesChanges += removed;
+        }
+      } catch (e) {}
+    });
   });
-  const maxTokens = Math.max(...tokenInBuckets, ...tokenOutBuckets, 1);
-  const tokenData = tokenInBuckets.map((_, i) => ({
+
+  const sessionsUsageData = new Array(bucketCount).fill(0).map((_, i) => ({
     label: `${i}h`,
-    values: [
-      { key: 'Input', value: (tokenInBuckets[i] / maxTokens) * 50 },
-      { key: 'Output', value: (tokenOutBuckets[i] / maxTokens) * 50 },
-    ]
+    values: [{ key: 'sessions', value: sessionsUsageBuckets[i] }]
   })).reverse();
 
-  // 3. API Calls by Model
+  const tokensUsageData = new Array(bucketCount).fill(0).map((_, i) => ({
+    label: `${i}h`,
+    values: Object.entries(tokensUsageBuckets).map(([k, buckets]) => ({ key: k, value: buckets[i] }))
+  })).reverse();
+
+  const linesUsageData = new Array(bucketCount).fill(0).map((_, i) => ({
+    label: `${i}h`,
+    values: Object.entries(linesUsageBuckets).map(([k, buckets]) => ({ key: k, value: buckets[i] }))
+  })).reverse();
+
+  // 1. API Calls Trends (Line)
   const modelCalls: Record<string, number[]> = {};
   recentSessions.forEach(s => {
     const idx = getBucketIdx(s.started_at);
     if (!modelCalls[s.model_name]) modelCalls[s.model_name] = new Array(bucketCount).fill(0);
     modelCalls[s.model_name][idx]++;
   });
-  const maxModelCalls = Math.max(...Object.values(modelCalls).flatMap(b => b), 1);
   const apiCallData = new Array(bucketCount).fill(0).map((_, i) => ({
     label: `${i}h`,
     values: Object.entries(modelCalls).map(([model, buckets]) => ({
       key: model,
-      value: (buckets[i] / maxModelCalls) * 100
+      value: buckets[i]
     }))
   })).reverse();
 
-  // 4. Tool Calls Over Time
-  const toolCallsMap: Record<string, number[]> = {};
+  const extractToolName = (sp: any) => {
+    if (sp.tool_calls && sp.tool_calls.length > 0 && sp.tool_calls[0].name) {
+      return sp.tool_calls[0].name;
+    }
+    try {
+      const attrs = JSON.parse(sp.attributes || '{}');
+      return attrs._toolName || attrs['gen_ai.tool.name'] || 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+
+  // 2. Tool Calls Distribution (One bar per tool - TOTAL)
+  const toolTotals: Record<string, number> = {};
   recentSessions.forEach(s => {
-    const idx = getBucketIdx(s.started_at);
-    s.spans.forEach(sp => {
-      sp.tool_calls.forEach(tc => {
-        if (!toolCallsMap[tc.name]) toolCallsMap[tc.name] = new Array(bucketCount).fill(0);
-        toolCallsMap[tc.name][idx]++;
-      });
+    s.spans.filter(sp => sp.name === 'tool_call').forEach(sp => {
+      const toolName = extractToolName(sp);
+      toolTotals[toolName] = (toolTotals[toolName] || 0) + 1;
     });
   });
-  const maxToolCalls = Math.max(...Object.values(toolCallsMap).flatMap(b => b), 1);
-  const toolCallData = new Array(bucketCount).fill(0).map((_, i) => ({
+  const toolCallData = Object.entries(toolTotals).map(([name, count]) => ({
+    label: name,
+    values: [{ key: name, value: count }]
+  }));
+
+  // 3. API Latency p99 (Line)
+  const apiLatencyBuckets: Record<string, number[][]> = {};
+  recentSessions.forEach(s => {
+    const idx = getBucketIdx(s.started_at);
+    if (!apiLatencyBuckets[s.model_name]) apiLatencyBuckets[s.model_name] = Array.from({ length: bucketCount }, () => []);
+    s.spans.filter(sp => sp.name === 'llm_call' || sp.name === 'model.generate').forEach(sp => {
+      apiLatencyBuckets[s.model_name][idx].push(sp.duration_ms);
+    });
+  });
+  const apiLatencyData = new Array(bucketCount).fill(0).map((_, i) => ({
     label: `${i}h`,
-    values: Object.entries(toolCallsMap).map(([tool, buckets]) => ({
-      key: tool,
-      value: (buckets[i] / maxToolCalls) * 100
+    values: Object.entries(apiLatencyBuckets).map(([model, buckets]) => ({
+      key: model,
+      value: calculateP99(buckets[i])
     }))
   })).reverse();
 
-  // Error rate calculation
-  const totalSpans = recentSessions.reduce((acc, s) => acc + s.spans.length, 0);
-  const errorSpans = recentSessions.reduce((acc, s) => acc + s.spans.filter(sp => sp.status === 'ERROR').length, 0);
-  const errorRate = totalSpans > 0 ? ((errorSpans / totalSpans) * 100).toFixed(2) : '0.00';
-
-  const healthItems = [
-    { label: 'Status', value: 'ACTIVE' },
-    { label: 'Sessions (24h)', value: totalSessions.toString() },
-    { label: 'Error Rate', value: `${errorRate}%`, isHighlighted: Number(errorRate) > 5 },
-    { label: 'Estimated Cost', value: `$${totalCost.toFixed(4)}` },
-  ];
+  // 4. Tool Latency p99 (Line)
+  const toolLatencyBuckets: Record<string, number[][]> = {};
+  recentSessions.forEach(s => {
+    const idx = getBucketIdx(s.started_at);
+    s.spans.filter(sp => sp.name === 'tool_call').forEach(sp => {
+      const toolName = extractToolName(sp);
+      if (!toolLatencyBuckets[toolName]) toolLatencyBuckets[toolName] = Array.from({ length: bucketCount }, () => []);
+      toolLatencyBuckets[toolName][idx].push(sp.duration_ms);
+    });
+  });
+  const toolLatencyData = new Array(bucketCount).fill(0).map((_, i) => ({
+    label: `${i}h`,
+    values: Object.entries(toolLatencyBuckets).map(([tool, buckets]) => ({
+      key: tool,
+      value: calculateP99(buckets[i])
+    }))
+  })).reverse();
 
   return (
     <>
@@ -120,76 +164,67 @@ export default async function DashboardPage() {
 
       <main className="dashboard-container">
         {/* Header */}
-        <div className="panel panel-header">
-          <div className="flex justify-between items-start">
-            <div>
-              <span className="label">Live Telemetry</span>
-              <h1>Gemini CLI Dashboard</h1>
-              <p className="block-text opacity-70 mt-2">
-                Monitoring local instance metrics and traces via OTLP/HTTP.
-              </p>
-            </div>
-            <div className="text-right">
-              <span className="label">Active Model</span>
-              <div className="font-bold text-xl uppercase">Gemini 1.5 Multi</div>
-            </div>
+        <div className="panel panel-header" style={{ padding: '16px' }}>
+          <h1 style={{ fontSize: '1.5rem', margin: 0 }}>Gemini Observability</h1>
+        </div>
+
+        {/* Section: Usage Module */}
+        <div style={{ gridColumn: 'span 12', padding: '8px 4px 0 4px' }}>
+          <h2 style={{ fontSize: '1.25rem', margin: 0, textTransform: 'uppercase', fontWeight: 700, letterSpacing: '-0.02em' }}>Usage</h2>
+        </div>
+
+        {/* Top row: 3 charts */}
+        <TimeSeriesChart title="Sessions" data={sessionsUsageData} height={140} variant="line" className="col-span-4" style={{ gridColumn: 'span 4', padding: '12px' }} />
+        <TimeSeriesChart title="Tokens" data={tokensUsageData} height={140} variant="line" className="col-span-4" style={{ gridColumn: 'span 4', padding: '12px' }} />
+        <TimeSeriesChart title="Lines Changes" data={linesUsageData} height={140} variant="line" className="col-span-4" style={{ gridColumn: 'span 4', padding: '12px' }} />
+
+        {/* Bottom row: 3 metrics */}
+        <div className="panel" style={{ gridColumn: 'span 4', padding: '16px 20px' }}>
+          <span style={{ fontSize: '0.9rem', color: '#111', fontWeight: 500 }}>Total Sessions</span>
+          <div style={{ color: '#1e8e3e', fontSize: '3.5rem', fontWeight: 500, marginTop: '8px', lineHeight: 1 }}>
+            {formatNumber(totalSessions)}
+          </div>
+        </div>
+        <div className="panel" style={{ gridColumn: 'span 4', padding: '16px 20px' }}>
+          <span style={{ fontSize: '0.9rem', color: '#111', fontWeight: 500 }}>Total Tokens</span>
+          <div style={{ color: '#1e8e3e', fontSize: '3.5rem', fontWeight: 500, marginTop: '8px', lineHeight: 1 }}>
+            {formatNumber(totalTokens)}
+          </div>
+        </div>
+        <div className="panel relative" style={{ gridColumn: 'span 4', padding: '16px 20px' }}>
+          <span style={{ fontSize: '0.9rem', color: '#111', fontWeight: 500 }}>Total Lines Changes</span>
+          <div className="absolute top-4 right-4 flex gap-2 text-gray-400">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
+          </div>
+          <div style={{ color: '#1e8e3e', fontSize: '3.5rem', fontWeight: 500, marginTop: '8px', lineHeight: 1 }}>
+            {formatNumber(totalLinesChanges)}
           </div>
         </div>
 
-        {/* Section: Usage */}
-        <div className="col-span-12 mt-4 mb-2">
-          <h2 className="text-xs font-black uppercase tracking-widest opacity-50">Usage Metrics</h2>
-        </div>
-
-        <div className="panel panel-metric">
-          <span className="label">Total Sessions</span>
-          <div className="value">{formatNumber(totalSessions)}</div>
-          <MiniChart bars={sessionBuckets.slice(0, 12).map(v => (v / Math.max(...sessionBuckets, 1)) * 100)} />
-        </div>
-
-        <div className="panel panel-metric">
-          <span className="label">Total Tokens</span>
-          <div className="value">{formatNumber(totalTokens)}</div>
-          <MiniChart bars={tokenInBuckets.slice(0, 12).map(v => (v / Math.max(...tokenInBuckets, 1)) * 100)} />
-        </div>
-
-        <TimeSeriesChart title="Sessions Over Time (24h)" data={sessionData} height={120} />
-        <TimeSeriesChart title="Token Volume (Input/Output)" data={tokenData} height={120} />
-
         {/* Section: API & Tools */}
-        <div className="col-span-12 mt-8 mb-2">
-          <h2 className="text-xs font-black uppercase tracking-widest opacity-50">API & Tool Analytics</h2>
+        <div style={{ gridColumn: 'span 12', padding: '8px 4px 0 4px' }}>
+          <h2 style={{ fontSize: '1.25rem', margin: 0, textTransform: 'uppercase', fontWeight: 700, letterSpacing: '-0.02em' }}>API & Tools</h2>
         </div>
 
-        <TimeSeriesChart title="API Calls by Model" data={apiCallData} height={150} />
-        <TimeSeriesChart title="Tool Execution Frequency" data={toolCallData} height={150} />
-
-        <div className="panel panel-status" style={{ gridColumn: 'span 4' }}>
-          <SystemHealth items={healthItems} />
-        </div>
-
-        <div className="panel panel-logs" style={{ gridColumn: 'span 8' }}>
-          <span className="label">Recent Activity</span>
-          <StreamEventLog entries={buildLogEntries(recentSessions)} />
-        </div>
+        <TimeSeriesChart title="API Calls" data={apiCallData} height={140} variant="line" unit=" reqs" />
+        <TimeSeriesChart title="Tool Distribution" data={toolCallData} height={140} variant="distribution" unit=" total" />
+        <TimeSeriesChart title="API Latency (p99)" data={apiLatencyData} height={140} variant="line" unit="ms" />
+        <TimeSeriesChart title="Tool Latency (p99)" data={toolLatencyData} height={140} variant="line" unit="ms" />
       </main>
     </>
   );
 }
 
-function formatNumber(num: number): string {
-  if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
-  if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
-  return num.toString();
+function calculateP99(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.floor(sorted.length * 0.99);
+  return sorted[idx];
 }
 
-function buildLogEntries(sessions: any[]) {
-  return sessions.flatMap(s => 
-    s.spans.slice(0, 5).map((sp: any) => ({
-      time: new Date(sp.started_at).toLocaleTimeString([], { hour12: false }),
-      message: `${sp.name} (${s.model_name})`,
-      status: sp.status === 'ERROR' ? '500 ERR' : '200 OK',
-      isError: sp.status === 'ERROR'
-    }))
-  ).sort((a, b) => b.time.localeCompare(a.time)).slice(0, 10);
+function formatNumber(num: number): string {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
+  return num.toString();
 }
