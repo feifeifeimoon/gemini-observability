@@ -12,18 +12,13 @@ export default async function DashboardPage() {
       started_at: { gte: twentyFourHoursAgo },
     },
     include: {
-      spans: {
-        include: {
-          tool_calls: true
-        }
-      },
+      spans: true,
     },
     orderBy: { started_at: 'desc' },
   });
 
   const totalSessions = recentSessions.length;
   const totalTokens = recentSessions.reduce((acc, s) => acc + s.total_input_tokens + s.total_output_tokens, 0);
-  const totalCost = recentSessions.reduce((acc, s) => acc + s.estimated_cost, 0);
 
   const bucketCount = 24;
   const bucketSize = (24 * 60 * 60 * 1000) / bucketCount;
@@ -97,9 +92,6 @@ export default async function DashboardPage() {
   })).reverse();
 
   const extractToolName = (sp: any) => {
-    if (sp.tool_calls && sp.tool_calls.length > 0 && sp.tool_calls[0].name) {
-      return sp.tool_calls[0].name;
-    }
     try {
       const attrs = JSON.parse(sp.attributes || '{}');
       return attrs._toolName || attrs['gen_ai.tool.name'] || 'unknown';

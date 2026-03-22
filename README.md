@@ -1,5 +1,7 @@
 # Gemini CLI Observability Dashboard
 
+![Dashboard Preview](./public/dashboard-preview.png)
+
 A local-first observability solution for the [Gemini CLI](https://geminicli.com/). This dashboard enables developers to debug agent tool calls, monitor performance, and track LLM costs in real-time without external infrastructure.
 
 This project implements a local collector for the telemetry data exported by Gemini CLI as described in the [official telemetry documentation](https://geminicli.com/docs/cli/telemetry/).

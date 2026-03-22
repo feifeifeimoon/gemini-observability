@@ -27,14 +27,5 @@ model Span {
   attributes     String     // SQLite doesn't support JSON, use String and parse/stringify
   duration_ms    Int
   started_at     DateTime?  // Optional for backward compatibility, but we should populate it
-  tool_calls     ToolCall[]
 }
 
-model ToolCall {
-  id       Int    @id @default(autoincrement())
-  span     Span   @relation(fields: [span_id], references: [id])
-  span_id  String
-  name     String
-  input    String // SQLite doesn't support JSON
-  output   String // SQLite doesn't support JSON
-}
