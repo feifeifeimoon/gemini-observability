@@ -57,6 +57,7 @@ function getValue(v: Value): any {
 
 function flattenAttributes(attributes: KeyValue[]): Record<string, any> {
   const result: Record<string, any> = {};
+  if (!attributes) return result;
   for (const attr of attributes) {
     result[attr.key] = getValue(attr.value);
   }
@@ -68,7 +69,8 @@ export async function processTracePayload(payload: OtlpTracePayload) {
 
   for (const resourceSpan of payload.resourceSpans) {
     const resourceAttrs = flattenAttributes(resourceSpan.resource.attributes);
-    const model_name = resourceAttrs['model_name'] || 'unknown-model';
+    // Initial model name from resource, or fallback
+    let current_model_name = resourceAttrs['model_name'] || 'unknown-model';
 
     for (const scopeSpan of resourceSpan.scopeSpans) {
       if (!scopeSpan.spans) continue;
@@ -80,7 +82,6 @@ export async function processTracePayload(payload: OtlpTracePayload) {
           const parentSpanId = otelSpan.parentSpanId;
           const name = otelSpan.name;
           
-          // Safer timestamp parsing
           const startTime = BigInt(otelSpan.startTimeUnixNano);
           const endTime = BigInt(otelSpan.endTimeUnixNano);
           const duration_ms = Number((endTime - startTime) / 1_000_000n);
@@ -89,18 +90,26 @@ export async function processTracePayload(payload: OtlpTracePayload) {
           const attributes = flattenAttributes(otelSpan.attributes);
           const status = otelSpan.status.code === 1 ? 'OK' : (otelSpan.status.code === 2 ? 'ERROR' : 'UNSET');
 
+          // 🚨 IMPROVEMENT: Check span attributes for specific model name (Gen AI conventions)
+          const span_model = attributes['gen_ai.request.model'] || attributes['model'];
+          if (span_model && current_model_name === 'unknown-model') {
+            current_model_name = span_model;
+          }
+
           // Extract token usage
           const inputTokens = Number(attributes['gen_ai.usage.input_tokens'] || 0);
           const outputTokens = Number(attributes['gen_ai.usage.output_tokens'] || 0);
-          const cost = calculateCost(model_name, inputTokens, outputTokens);
+          const cost = calculateCost(current_model_name, inputTokens, outputTokens);
 
-          // Manual session management to avoid upsert issues
+          // Manual session management
           const existingSession = await prisma.session.findUnique({ where: { id: traceId } });
           
           if (existingSession) {
             await prisma.session.update({
               where: { id: traceId },
               data: {
+                // Update model name if we found a better one
+                model_name: existingSession.model_name === 'unknown-model' ? current_model_name : existingSession.model_name,
                 total_input_tokens: existingSession.total_input_tokens + inputTokens,
                 total_output_tokens: existingSession.total_output_tokens + outputTokens,
                 estimated_cost: existingSession.estimated_cost + cost,
@@ -110,7 +119,7 @@ export async function processTracePayload(payload: OtlpTracePayload) {
             await prisma.session.create({
               data: {
                 id: traceId,
-                model_name: model_name,
+                model_name: current_model_name,
                 started_at: startedAt,
                 total_input_tokens: inputTokens,
                 total_output_tokens: outputTokens,

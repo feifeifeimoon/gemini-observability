@@ -1,13 +1,13 @@
 import prisma from '@/lib/db';
 import { MiniChart } from '@/components/MiniChart';
-import { ContextChart } from '@/components/ContextChart';
 import { SystemHealth } from '@/components/SystemHealth';
 import { StreamEventLog } from '@/components/StreamEventLog';
+import { AutoRefresh } from '@/components/AutoRefresh';
+import { TimeSeriesChart } from '@/components/TimeSeriesChart';
 
 export default async function DashboardPage() {
-  // Fetch session data for metrics
-  const twentyFourHoursAgo = new Date();
-  twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+  const now = new Date();
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
   const recentSessions = await prisma.session.findMany({
     where: {
@@ -15,283 +15,181 @@ export default async function DashboardPage() {
     },
     include: {
       spans: {
-        select: {
-          status: true,
-          started_at: true,
-          duration_ms: true,
-          name: true,
-        },
+        include: {
+          tool_calls: true
+        }
       },
     },
     orderBy: { started_at: 'desc' },
   });
 
-  // Total requests (24h) - count spans as requests
-  const totalRequests = recentSessions.reduce(
-    (acc, s) => acc + s.spans.length,
-    0
-  );
+  // Basic stats
+  const totalSessions = recentSessions.length;
+  const totalTokens = recentSessions.reduce((acc, s) => acc + s.total_input_tokens + s.total_output_tokens, 0);
+  const totalCost = recentSessions.reduce((acc, s) => acc + s.estimated_cost, 0);
 
-  // Token stats from session-level aggregates
-  const totalInputTokens = recentSessions.reduce(
-    (acc, s) => acc + s.total_input_tokens,
-    0
-  );
-  const totalOutputTokens = recentSessions.reduce(
-    (acc, s) => acc + s.total_output_tokens,
-    0
-  );
+  // Time-series bucketing (24 buckets for 24h)
+  const bucketCount = 24;
+  const bucketSize = (24 * 60 * 60 * 1000) / bucketCount;
+  
+  const getBucketIdx = (date: Date) => {
+    const age = now.getTime() - date.getTime();
+    return Math.min(bucketCount - 1, Math.max(0, Math.floor(age / bucketSize)));
+  };
 
-  // Avg latency using span duration_ms
-  const spanDurations = recentSessions.flatMap((s) =>
-    s.spans.map((sp) => sp.duration_ms)
-  );
-  const avgLatency =
-    spanDurations.length > 0
-      ? Math.round(spanDurations.reduce((a, b) => a + b, 0) / spanDurations.length)
-      : 0;
-  const sortedDurations = [...spanDurations].sort((a, b) => a - b);
-  const p50 = sortedDurations.length > 0 ? sortedDurations[Math.floor(sortedDurations.length * 0.5)] : 0;
-  const p99 = sortedDurations.length > 0 ? sortedDurations[Math.floor(sortedDurations.length * 0.99)] : 0;
+  // 1. Sessions Over Time
+  const sessionBuckets = new Array(bucketCount).fill(0);
+  recentSessions.forEach(s => {
+    sessionBuckets[getBucketIdx(s.started_at)]++;
+  });
+  const sessionData = sessionBuckets.reverse().map((count, i) => ({
+    label: `${i}h`,
+    values: [{ key: 'Sessions', value: (count / (Math.max(...sessionBuckets, 1))) * 100 }]
+  }));
 
-  // Error rate
+  // 2. Tokens Over Time (Input vs Output)
+  const tokenInBuckets = new Array(bucketCount).fill(0);
+  const tokenOutBuckets = new Array(bucketCount).fill(0);
+  recentSessions.forEach(s => {
+    const idx = getBucketIdx(s.started_at);
+    tokenInBuckets[idx] += s.total_input_tokens;
+    tokenOutBuckets[idx] += s.total_output_tokens;
+  });
+  const maxTokens = Math.max(...tokenInBuckets, ...tokenOutBuckets, 1);
+  const tokenData = tokenInBuckets.map((_, i) => ({
+    label: `${i}h`,
+    values: [
+      { key: 'Input', value: (tokenInBuckets[i] / maxTokens) * 50 },
+      { key: 'Output', value: (tokenOutBuckets[i] / maxTokens) * 50 },
+    ]
+  })).reverse();
+
+  // 3. API Calls by Model
+  const modelCalls: Record<string, number[]> = {};
+  recentSessions.forEach(s => {
+    const idx = getBucketIdx(s.started_at);
+    if (!modelCalls[s.model_name]) modelCalls[s.model_name] = new Array(bucketCount).fill(0);
+    modelCalls[s.model_name][idx]++;
+  });
+  const maxModelCalls = Math.max(...Object.values(modelCalls).flatMap(b => b), 1);
+  const apiCallData = new Array(bucketCount).fill(0).map((_, i) => ({
+    label: `${i}h`,
+    values: Object.entries(modelCalls).map(([model, buckets]) => ({
+      key: model,
+      value: (buckets[i] / maxModelCalls) * 100
+    }))
+  })).reverse();
+
+  // 4. Tool Calls Over Time
+  const toolCallsMap: Record<string, number[]> = {};
+  recentSessions.forEach(s => {
+    const idx = getBucketIdx(s.started_at);
+    s.spans.forEach(sp => {
+      sp.tool_calls.forEach(tc => {
+        if (!toolCallsMap[tc.name]) toolCallsMap[tc.name] = new Array(bucketCount).fill(0);
+        toolCallsMap[tc.name][idx]++;
+      });
+    });
+  });
+  const maxToolCalls = Math.max(...Object.values(toolCallsMap).flatMap(b => b), 1);
+  const toolCallData = new Array(bucketCount).fill(0).map((_, i) => ({
+    label: `${i}h`,
+    values: Object.entries(toolCallsMap).map(([tool, buckets]) => ({
+      key: tool,
+      value: (buckets[i] / maxToolCalls) * 100
+    }))
+  })).reverse();
+
+  // Error rate calculation
   const totalSpans = recentSessions.reduce((acc, s) => acc + s.spans.length, 0);
-  const errorSpans = recentSessions.reduce(
-    (acc, s) => acc + s.spans.filter((sp) => sp.status === 'error').length,
-    0
-  );
+  const errorSpans = recentSessions.reduce((acc, s) => acc + s.spans.filter(sp => sp.status === 'ERROR').length, 0);
   const errorRate = totalSpans > 0 ? ((errorSpans / totalSpans) * 100).toFixed(2) : '0.00';
 
-  // Compute hourly request distribution for mini-chart (last 10 buckets)
-  const requestBars = computeHourlyBars(recentSessions, 10);
-
-  // Tokens in/sec and out/sec (rough estimation over 24h)
-  const hoursActive = 24;
-  const tokensInPerSec = totalInputTokens / (hoursActive * 3600);
-  const tokensOutPerSec = totalOutputTokens / (hoursActive * 3600);
-
-  // Format token rates
-  const formattedTokensIn = formatTokenRate(tokensInPerSec);
-  const formattedTokensOut = formatTokenRate(tokensOutPerSec);
-
-  // Build mini-chart bars for tokens using session-level data
-  const tokenInBars = computeSessionTokenBars(recentSessions, 'input', 8);
-  const tokenOutBars = computeSessionTokenBars(recentSessions, 'output', 8);
-
-  // Context chart bars (simulated distribution from real data)
-  const contextBars = computeContextBars(recentSessions);
-
-  // System health items
   const healthItems = [
-    { label: 'API Connection', value: 'STABLE' },
-    { label: 'Rate Limits', value: `${Math.min(99, Math.round((totalRequests / 1500) * 100))}% USED` },
-    { label: 'Cache Hits', value: '68.2%' },
-    { label: 'Error Rate', value: `${errorRate}%`, isHighlighted: true },
+    { label: 'Status', value: 'ACTIVE' },
+    { label: 'Sessions (24h)', value: totalSessions.toString() },
+    { label: 'Error Rate', value: `${errorRate}%`, isHighlighted: Number(errorRate) > 5 },
+    { label: 'Estimated Cost', value: `$${totalCost.toFixed(4)}` },
   ];
-
-  // Stream event log entries from recent spans
-  const logEntries = buildLogEntries(recentSessions);
 
   return (
     <>
+      <AutoRefresh interval={3000} />
       <div className="ambient-background" />
       <div className="noise-overlay" />
 
       <main className="dashboard-container">
         {/* Header */}
         <div className="panel panel-header">
-          <div>
-            <span className="label">System State</span>
-            <h1>Gemini CLI Observability</h1>
-            <div className="block-text" style={{ maxWidth: '600px', marginTop: '12px' }}>
-              MONITORING LOCAL INSTANCE. TRACKING TOKEN USAGE, LATENCY DISTRIBUTIONS, AND STREAMING COMPLETION LOGS IN REAL-TIME.
+          <div className="flex justify-between items-start">
+            <div>
+              <span className="label">Live Telemetry</span>
+              <h1>Gemini CLI Dashboard</h1>
+              <p className="block-text opacity-70 mt-2">
+                Monitoring local instance metrics and traces via OTLP/HTTP.
+              </p>
+            </div>
+            <div className="text-right">
+              <span className="label">Active Model</span>
+              <div className="font-bold text-xl uppercase">Gemini 1.5 Multi</div>
             </div>
           </div>
-          <div className="controls">
-            <button className="primary">Live Tail</button>
-            <button>Export Logs</button>
-            <button>Configure</button>
-          </div>
         </div>
 
-        {/* Metric: Total Requests */}
+        {/* Section: Usage */}
+        <div className="col-span-12 mt-4 mb-2">
+          <h2 className="text-xs font-black uppercase tracking-widest opacity-50">Usage Metrics</h2>
+        </div>
+
         <div className="panel panel-metric">
-          <span className="label">Total Requests (24h)</span>
-          <div className="value">{totalRequests.toLocaleString()}</div>
-          <MiniChart bars={requestBars} />
+          <span className="label">Total Sessions</span>
+          <div className="value">{formatNumber(totalSessions)}</div>
+          <MiniChart bars={sessionBuckets.slice(0, 12).map(v => (v / Math.max(...sessionBuckets, 1)) * 100)} />
         </div>
 
-        {/* Metric: Avg Latency */}
         <div className="panel panel-metric">
-          <span className="label">Avg Latency (TTFT)</span>
-          <div className="value">
-            {avgLatency}
-            <span className="value-small">ms</span>
-          </div>
-          <div style={{ marginTop: '1rem', fontSize: '0.85rem', display: 'flex', justifyContent: 'space-between' }}>
-            <span>p50: {formatDuration(p50)}</span>
-            <span>p99: {formatDuration(p99)}</span>
-          </div>
+          <span className="label">Total Tokens</span>
+          <div className="value">{formatNumber(totalTokens)}</div>
+          <MiniChart bars={tokenInBuckets.slice(0, 12).map(v => (v / Math.max(...tokenInBuckets, 1)) * 100)} />
         </div>
 
-        {/* Metric: Tokens In/Sec */}
-        <div className="panel panel-metric">
-          <span className="label">Tokens In / Sec</span>
-          <div className="value">
-            {formattedTokensIn.value}
-            {formattedTokensIn.suffix && <span className="value-small">{formattedTokensIn.suffix}</span>}
-          </div>
-          <MiniChart bars={tokenInBars} />
+        <TimeSeriesChart title="Sessions Over Time (24h)" data={sessionData} height={120} />
+        <TimeSeriesChart title="Token Volume (Input/Output)" data={tokenData} height={120} />
+
+        {/* Section: API & Tools */}
+        <div className="col-span-12 mt-8 mb-2">
+          <h2 className="text-xs font-black uppercase tracking-widest opacity-50">API & Tool Analytics</h2>
         </div>
 
-        {/* Metric: Tokens Out/Sec */}
-        <div className="panel panel-metric">
-          <span className="label">Tokens Out / Sec</span>
-          <div className="value">
-            {formattedTokensOut.value}
-            {formattedTokensOut.suffix && <span className="value-small">{formattedTokensOut.suffix}</span>}
-          </div>
-          <MiniChart bars={tokenOutBars} />
+        <TimeSeriesChart title="API Calls by Model" data={apiCallData} height={150} />
+        <TimeSeriesChart title="Tool Execution Frequency" data={toolCallData} height={150} />
+
+        <div className="panel panel-status" style={{ gridColumn: 'span 4' }}>
+          <SystemHealth items={healthItems} />
         </div>
 
-        {/* Context Window Chart */}
-        <ContextChart bars={contextBars} />
-
-        {/* System Health */}
-        <SystemHealth items={healthItems} />
-
-        {/* Stream Event Log */}
-        <StreamEventLog entries={logEntries} />
+        <div className="panel panel-logs" style={{ gridColumn: 'span 8' }}>
+          <span className="label">Recent Activity</span>
+          <StreamEventLog entries={buildLogEntries(recentSessions)} />
+        </div>
       </main>
     </>
   );
 }
 
-// --- Helper Functions ---
-
-type SessionWithSpans = {
-  id: string;
-  started_at: Date;
-  model_name: string;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  estimated_cost: number;
-  spans: {
-    status: string;
-    started_at: Date | null;
-    duration_ms: number;
-    name: string;
-  }[];
-};
-
-function computeHourlyBars(sessions: SessionWithSpans[], bucketCount: number): number[] {
-  const now = Date.now();
-  const bucketSize = (24 * 3600 * 1000) / bucketCount;
-  const buckets = new Array(bucketCount).fill(0);
-
-  sessions.forEach((s) =>
-    s.spans.forEach((sp) => {
-      if (!sp.started_at) return;
-      const age = now - new Date(sp.started_at).getTime();
-      const idx = Math.min(bucketCount - 1, Math.max(0, Math.floor(age / bucketSize)));
-      buckets[bucketCount - 1 - idx]++;
-    })
-  );
-
-  const max = Math.max(...buckets, 1);
-  return buckets.map((v) => Math.round((v / max) * 100));
+function formatNumber(num: number): string {
+  if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
+  return num.toString();
 }
 
-function computeSessionTokenBars(
-  sessions: SessionWithSpans[],
-  type: 'input' | 'output',
-  bucketCount: number
-): number[] {
-  const now = Date.now();
-  const bucketSize = (24 * 3600 * 1000) / bucketCount;
-  const buckets = new Array(bucketCount).fill(0);
-
-  sessions.forEach((s) => {
-    const age = now - new Date(s.started_at).getTime();
-    const idx = Math.min(bucketCount - 1, Math.max(0, Math.floor(age / bucketSize)));
-    buckets[bucketCount - 1 - idx] += type === 'input' ? s.total_input_tokens : s.total_output_tokens;
-  });
-
-  const max = Math.max(...buckets, 1);
-  return buckets.map((v) => Math.round((v / max) * 100));
-}
-
-function computeContextBars(sessions: SessionWithSpans[]): number[] {
-  // Generate context window saturation data from session token usage
-  if (sessions.length === 0) {
-    return [10, 15, 20, 45, 60, 55, 80, 95, 90, 70, 50, 30];
-  }
-
-  // Use session total tokens to create a distribution
-  const sorted = [...sessions]
-    .sort((a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime())
-    .slice(-12);
-
-  if (sorted.length === 0) {
-    return [10, 15, 20, 45, 60, 55, 80, 95, 90, 70, 50, 30];
-  }
-
-  const totals = sorted.map((s) => s.total_input_tokens + s.total_output_tokens);
-  const max = Math.max(...totals, 1);
-  return totals.map((t) => Math.max(5, Math.round((t / max) * 100)));
-}
-
-function formatTokenRate(rate: number): { value: string; suffix?: string } {
-  if (rate >= 1000) {
-    return { value: (rate / 1000).toFixed(1), suffix: 'k' };
-  }
-  return { value: Math.round(rate).toString() };
-}
-
-function formatDuration(ms: number): string {
-  if (ms >= 1000) {
-    return `${(ms / 1000).toFixed(1)}s`;
-  }
-  return `${ms}ms`;
-}
-
-function buildLogEntries(
-  sessions: SessionWithSpans[]
-): { time: string; message: string; status: string; isError?: boolean }[] {
-  const allSpans = sessions
-    .flatMap((s) =>
-      s.spans.map((sp) => ({
-        ...sp,
-        model: s.model_name,
-        sessionInputTokens: s.total_input_tokens,
-        sessionOutputTokens: s.total_output_tokens,
-      }))
-    )
-    .filter((sp) => sp.started_at)
-    .sort((a, b) => new Date(b.started_at!).getTime() - new Date(a.started_at!).getTime())
-    .slice(0, 15);
-
-  return allSpans.map((sp) => {
-    const time = new Date(sp.started_at!).toLocaleTimeString('en-US', {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-    const isError = sp.status === 'error';
-
-    if (isError) {
-      return {
-        time,
-        message: `ERR: ${sp.name} - model: ${sp.model} - duration: ${sp.duration_ms}ms`,
-        status: '500 ERR',
-        isError: true,
-      };
-    }
-    return {
-      time,
-      message: `REQ: ${sp.name} - model: ${sp.model} - duration: ${sp.duration_ms}ms`,
-      status: '200 OK',
-    };
-  });
+function buildLogEntries(sessions: any[]) {
+  return sessions.flatMap(s => 
+    s.spans.slice(0, 5).map((sp: any) => ({
+      time: new Date(sp.started_at).toLocaleTimeString([], { hour12: false }),
+      message: `${sp.name} (${s.model_name})`,
+      status: sp.status === 'ERROR' ? '500 ERR' : '200 OK',
+      isError: sp.status === 'ERROR'
+    }))
+  ).sort((a, b) => b.time.localeCompare(a.time)).slice(0, 10);
 }

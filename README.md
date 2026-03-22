@@ -12,19 +12,17 @@ This project implements a local collector for the telemetry data exported by Gem
 - [Quick Start](#quick-start)
 - [Connecting Gemini CLI](#connecting-gemini-cli)
 - [Project Structure](#project-structure)
-- [Contributing](#contributing)
 - [License](#license)
 
 ---
 
 ## Core Features
 
-- **OTLP Ingestion:** Built-in OpenTelemetry collector compatible with Gemini CLI's OTLP/HTTP export mode for Traces, Metrics, and Logs.
-- **Trace Waterfall Viewer:** Interactive visualization of agent execution paths, specifically optimized to highlight `tool.execute` spans and their nested structures.
-- **Cost Estimation:** Real-time cost tracking for Gemini models (1.5 Pro, 1.5 Flash, etc.) based on token usage attributes.
+- **OTLP Ingestion:** Built-in OpenTelemetry collector compatible with Gemini CLI's OTLP/HTTP export mode.
+- **Trace Waterfall Viewer:** Interactive visualization of agent execution paths, highlighting `tool.execute` spans and their nested structures.
+- **Cost Estimation:** Real-time cost tracking for Gemini models (1.5 Pro, 1.5 Flash, etc.) based on token usage.
 - **Usage Analytics:** Daily token consumption trends and model performance metrics.
 - **Local Persistence:** Powered by SQLite and Prisma for zero-config local data storage.
-- **Adaptive UI:** Responsive dashboard design supporting both Light and Dark modes.
 
 ---
 
@@ -40,11 +38,6 @@ graph LR
     D -- Server Actions --> E[React Dashboard]
 ```
 
-1. **Gemini CLI** exports telemetry using the standard OTLP/HTTP protocol.
-2. **Next.js Backend** provides endpoints (`/v1/traces`, `/v1/metrics`, `/v1/logs`) to ingest JSON payloads.
-3. **Data Processor** flattens nested OTEL spans into a relational schema optimized for LLM agent debugging.
-4. **React Frontend** provides the interface for exploring session history and debugging tool calls.
-
 ---
 
 ## Quick Start
@@ -57,8 +50,8 @@ graph LR
 
 1. **Clone and Install:**
    ```bash
-   git clone https://github.com/your-username/gemini-observability-dashboard.git
-   cd gemini-observability-dashboard
+   git clone https://github.com/feifeifeimoon/gemini-observability.git
+   cd gemini-observability
    npm install
    ```
 
@@ -77,28 +70,29 @@ graph LR
 
 ## Connecting Gemini CLI
 
-Follow these steps to configure your Gemini CLI to export data to this local dashboard. For more details on these settings, refer to the [Gemini CLI Telemetry Docs](https://geminicli.com/docs/cli/telemetry/).
+While Gemini CLI supports simple file-based logging by default, this dashboard requires an **Advanced local telemetry setup** using the OTLP protocol.
 
-Run these commands in your terminal:
+### Configuration
 
-```bash
-# 1. Enable telemetry
-gemini settings set telemetry.enabled true
+Add or update the following in your `.gemini/settings.json` file (typically located in your home directory or project root):
 
-# 2. Set the target to local mode
-gemini settings set telemetry.target local
-
-# 3. Configure the OTLP endpoint (Next.js listens on port 4318)
-gemini settings set telemetry.otlpEndpoint http://localhost:4318/api/otlp
-
-# 4. Use HTTP protocol for maximum compatibility
-gemini settings set telemetry.otlpProtocol http
+```json
+{
+  "telemetry": {
+    "enabled": true,
+    "target": "local",
+    "otlpEndpoint": "http://localhost:4318/api/otlp",
+    "otlpProtocol": "http"
+  }
+}
 ```
 
+For more details on these settings, refer to the [Gemini CLI Telemetry Docs](https://geminicli.com/docs/cli/telemetry/).
+
 ### Verification
-Run a simple command to trigger telemetry:
+Once configured, run any command to see the trace appear in the dashboard:
 ```bash
-gemini -p "Verify observability setup"
+gemini -p "Explain how OTLP works"
 ```
 
 ---
@@ -108,29 +102,15 @@ gemini -p "Verify observability setup"
 ```text
 ├── src/
 │   ├── app/                # Next.js App Router (Pages & API)
-│   │   ├── api/otlp/       # OTLP Ingestion endpoints (Traces, Metrics, Logs)
+│   │   ├── api/otlp/       # OTLP Ingestion endpoints
 │   │   └── sessions/       # Session Detail & Waterfall views
-│   ├── components/         # UI components (Charts, Trace Trees, Layouts)
+│   ├── components/         # UI components (Charts, Trace Trees)
 │   ├── lib/
-│   │   ├── telemetry/      # OTLP Payload Processor & Cost Logic
-│   │   └── db.ts           # Prisma Client Singleton
-│   └── constants/          # Model rates and shared configuration
-├── prisma/
-│   ├── schema.prisma       # Database schema definition
-└── docs/                   # Design specifications and implementation plans
+│   │   ├── telemetry/      # OTLP Processor & Cost Logic
+│   │   └── db.ts           # Prisma Client
+└── prisma/
+    └── schema.prisma       # Database schema
 ```
-
----
-
-## Contributing
-
-Contributions are welcome. Whether it's adding new model rates, improving the trace visualization, or fixing bugs:
-
-1. Fork the Project.
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`).
-4. Push to the Branch (`git push origin feature/AmazingFeature`).
-5. Open a Pull Request.
 
 ---
 
