@@ -19,12 +19,7 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-interface ToolCall {
-  id: number;
-  name: string;
-  input: string;
-  output: string;
-}
+
 
 interface Span {
   id: string;
@@ -33,7 +28,7 @@ interface Span {
   status: string;
   duration_ms: number;
   started_at: Date | string | null;
-  tool_calls: ToolCall[];
+
   attributes: string;
 }
 
@@ -50,13 +45,13 @@ interface SpanTreeNode extends Span {
 
 export function TraceWaterfall({ spans, sessionStartedAt }: TraceWaterfallProps) {
   const [expandedSpans, setExpandedSpans] = useState<Record<string, boolean>>({});
-  const [expandedTools, setExpandedTools] = useState<Record<number, boolean>>({});
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
 
   const toggleSpan = (id: string) => {
     setExpandedSpans(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const toggleTool = (id: number) => {
+  const toggleTool = (id: string) => {
     setExpandedTools(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
@@ -165,8 +160,18 @@ export function TraceWaterfall({ spans, sessionStartedAt }: TraceWaterfallProps)
           {/* Rows */}
           <div className="divide-y divide-zinc-100 dark:divide-zinc-800/50">
             {flattenedNodes.map(node => {
-              const isTool = node.name === 'tool.execute';
-              const hasToolCalls = node.tool_calls && node.tool_calls.length > 0;
+              const isTool = node.name === 'tool.execute' || node.name === 'tool_call';
+              
+              // Extract tool info from attributes
+              let tcParams = { name: '', input: '', output: '' };
+              try {
+                const attrs = JSON.parse(node.attributes || '{}');
+                tcParams.name = attrs['gen_ai.tool.name'] || '';
+                tcParams.input = attrs['gen_ai.input.messages'] || '';
+                tcParams.output = attrs['gen_ai.output.messages'] || '';
+              } catch (e) {}
+
+              const hasToolCalls = isTool && !!tcParams.name;
               const isError = node.status === 'ERROR';
 
               return (
@@ -188,7 +193,7 @@ export function TraceWaterfall({ spans, sessionStartedAt }: TraceWaterfallProps)
                         isTool ? "text-emerald-700 dark:text-emerald-400" : "text-zinc-900 dark:text-zinc-100",
                         isError && "text-red-600 dark:text-red-400"
                       )}>
-                        {isTool && hasToolCalls ? `tool.execute: ${node.tool_calls[0].name}` : node.name}
+                        {isTool && hasToolCalls ? `${node.name}: ${tcParams.name}` : node.name}
                       </span>
                       {isError && <AlertCircle size={12} className="text-red-500" />}
                     </div>
@@ -231,40 +236,40 @@ export function TraceWaterfall({ spans, sessionStartedAt }: TraceWaterfallProps)
                   </div>
 
                   {/* Tool Call Details */}
-                  {hasToolCalls && node.tool_calls.map(tc => (
-                    <div key={tc.id} className="bg-zinc-50 dark:bg-zinc-900/80 border-t border-zinc-100 dark:border-zinc-800/50">
+                  {hasToolCalls && (
+                    <div className="bg-zinc-50 dark:bg-zinc-900/80 border-t border-zinc-100 dark:border-zinc-800/50">
                       <div 
                         className="flex items-center gap-2 p-2 cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800/80 transition-colors"
-                        onClick={() => toggleTool(tc.id)}
+                        onClick={() => toggleTool(node.id)}
                       >
                         <div style={{ width: `${(node.depth + 1) * 20}px` }} className="flex-shrink-0" />
-                        {expandedTools[tc.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        {expandedTools[node.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         <Code size={14} className="text-purple-500" />
                         <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                          Tool Call: {tc.name}
+                          Tool Call: {tcParams.name}
                         </span>
                       </div>
                       
-                      {expandedTools[tc.id] && (
+                      {expandedTools[node.id] && (
                         <div className="p-4 pt-0">
                           <div style={{ marginLeft: `${(node.depth + 2) * 20}px` }} className="space-y-3">
                             <div>
                               <div className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Input</div>
                               <pre className="text-xs p-3 bg-zinc-900 dark:bg-black text-zinc-300 rounded-lg overflow-x-auto max-h-60 border border-zinc-800">
-                                {formatJson(tc.input)}
+                                {formatJson(tcParams.input)}
                               </pre>
                             </div>
                             <div>
                               <div className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Output</div>
                               <pre className="text-xs p-3 bg-zinc-900 dark:bg-black text-zinc-300 rounded-lg overflow-x-auto max-h-60 border border-zinc-800">
-                                {formatJson(tc.output)}
+                                {formatJson(tcParams.output)}
                               </pre>
                             </div>
                           </div>
                         </div>
                       )}
                     </div>
-                  ))}
+                  )}
                 </div>
               );
             })}

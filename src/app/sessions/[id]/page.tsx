@@ -28,9 +28,6 @@ export default async function SessionDetailPage({ params }: { params: Promise<{ 
     where: { id },
     include: {
       spans: {
-        include: {
-          tool_calls: true
-        },
         orderBy: {
           started_at: 'asc'
         }

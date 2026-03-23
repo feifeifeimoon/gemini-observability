@@ -138,28 +138,6 @@ export async function processTracePayload(payload: OtlpTracePayload) {
               started_at: startedAt,
             }
           });
-
-          // Strict Tool Call Extraction
-          if (name === 'tool_call') {
-            const toolName = attributes['gen_ai.tool.name'];
-            const input = attributes['gen_ai.input.messages'];
-            const output = attributes['gen_ai.output.messages'];
-
-            if (toolName) {
-              // Clear previous tool calls for this span to avoid unique constraint issues if we had them
-              // and ensure we only have one tool record per spanId.
-              await prisma.toolCall.deleteMany({ where: { span_id: spanId } });
-              
-              await prisma.toolCall.create({
-                data: {
-                  span_id: spanId,
-                  name: String(toolName),
-                  input: typeof input === 'string' ? input : JSON.stringify(input),
-                  output: typeof output === 'string' ? output : JSON.stringify(output),
-                }
-              });
-            }
-          }
         } catch (innerError) {
           console.error('Error processing individual span:', innerError);
         }
