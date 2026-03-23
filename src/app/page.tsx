@@ -3,6 +3,8 @@ import { MiniChart } from '@/components/MiniChart';
 import { AutoRefresh } from '@/components/AutoRefresh';
 import { TimeSeriesChart } from '@/components/TimeSeriesChart';
 
+export const dynamic = 'force-dynamic';
+
 export default async function DashboardPage() {
   const now = new Date();
   const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
