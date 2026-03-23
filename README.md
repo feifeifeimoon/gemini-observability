@@ -12,6 +12,7 @@ This project implements a local collector for the telemetry data exported by Gem
 - [Core Features](#core-features)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
+- [Docker Usage](#docker-usage)
 - [Connecting Gemini CLI](#connecting-gemini-cli)
 - [Project Structure](#project-structure)
 - [License](#license)
@@ -67,6 +68,20 @@ graph LR
    npm run dev
    ```
    The dashboard will be available at [http://localhost:4318](http://localhost:4318).
+
+---
+
+## Docker Usage
+
+### Build
+```bash
+docker build -t gemini-observability .
+```
+
+### Run
+```bash
+docker run -p 4318:4318 -v ./data:/app/data gemini-observability
+```
 
 ---
 
