@@ -18,15 +18,6 @@ CREATE TABLE "Span" (
     "status" TEXT NOT NULL,
     "attributes" TEXT NOT NULL,
     "duration_ms" INTEGER NOT NULL,
+    "started_at" DATETIME,
     CONSTRAINT "Span_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "Session" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
-);
-
--- CreateTable
-CREATE TABLE "ToolCall" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    "span_id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "input" TEXT NOT NULL,
-    "output" TEXT NOT NULL,
-    CONSTRAINT "ToolCall_span_id_fkey" FOREIGN KEY ("span_id") REFERENCES "Span" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
