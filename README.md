@@ -48,13 +48,16 @@ graph LR
 
 **Run with Pre-built Image:**
 ```bash
-docker run -p 4318:4318 -v ./data:/app/data feifeifeimoon0/gemini-observability:latest
+docker run -d \
+  --name gemini-observability \
+  -p 4318:4318 \
+  -v ./data:/app/data \
+  feifeifeimoon0/gemini-observability:latest
 ```
 
 **Or Build and Run from Source:**
 ```bash
 docker build -t gemini-observability .
-docker run -p 4318:4318 -v ./data:/app/data gemini-observability
 ```
 
 ### Option 2: Node.js (npm/pnpm/yarn)
